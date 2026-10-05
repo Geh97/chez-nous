@@ -153,6 +153,18 @@ drop policy if exists "docs : son espace" on public.docs;
 create policy "docs : son espace" on public.docs
   for all to authenticated using (space_id = public.my_space()) with check (space_id = public.my_space());
 
+-- Adresse secrète iCal du Google Agenda de chacun (lue uniquement par la fonction serveur "gcal")
+create table if not exists public.calendar_feeds (
+  user_id uuid primary key default auth.uid() references auth.users(id) on delete cascade,
+  url text not null check (url like 'https://calendar.google.com/calendar/ical/%'),
+  updated_at timestamptz not null default now()
+);
+alter table public.calendar_feeds enable row level security;
+grant select, insert, update, delete on public.calendar_feeds to authenticated;
+drop policy if exists "agenda google : le sien" on public.calendar_feeds;
+create policy "agenda google : le sien" on public.calendar_feeds
+  for all to authenticated using (user_id = auth.uid()) with check (user_id = auth.uid());
+
 -- Mise à jour en direct entre les téléphones
 do $$ begin
   if not exists (select 1 from pg_publication_tables where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = 'docs') then

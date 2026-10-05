@@ -179,6 +179,7 @@ const RECS = {none:"Une fois", daily:"Chaque jour", weekly:"Chaque semaine", mon
 const COLLS = ["reminders","events","tasks"];
 const CAP = {couple:2, famille:6};
 const APP_URL = location.origin + location.pathname;
+const GCAL_PREFIX = "https://calendar.google.com/calendar/ical/";
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -211,7 +212,8 @@ const S = {
   space:null, invites:[], pending:[], wantCreate:false, people:{}, me:null,
   reminders:[], events:[], tasks:[],
   tab:"frigo", noteView:"recus", month:new Date(new Date().getFullYear(), new Date().getMonth(), 1), day:today(),
-  taskWho:"me", taskCat:"all", showDone:false, edit:null
+  taskWho:"me", taskCat:"all", showDone:false, edit:null,
+  gcal:[], gcalStatus:{}, gcalMine:false
 };
 
 /* ---------- données (Supabase) ---------- */
@@ -250,7 +252,27 @@ async function loadAll(){
     r.data.forEach(row => applyRow(row.coll, row.id, row.data));
   }
   S.loaded = true; render();
+  if (S.space) loadGcal();
 }
+/* Google Agenda : événements en lecture seule, lus côté serveur (fonction gcal) */
+async function loadGcal(){
+  const r = await sb.functions.invoke("gcal", {method:"POST"});
+  if (r.error || !r.data || !r.data.events) return;
+  const hm = d => `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  S.gcalStatus = r.data.status || {};
+  S.gcal = r.data.events.map(g => {
+    const base = {id:"g:"+g.id, kind:"gcal", who:g.owner, title:g.title};
+    if (g.allDay) return Object.assign(base, {date:g.date, allDay:true, start:null, end:null});
+    const s = new Date(g.start), e = new Date(g.end);
+    return Object.assign(base, {date:ymd(s), allDay:false, start:hm(s), end:ymd(e) === ymd(s) ? hm(e) : null});
+  });
+  render();
+}
+async function loadGcalMine(){
+  const r = await sb.from("calendar_feeds").select("user_id").eq("user_id", S.uid).maybeSingle();
+  if (!r.error) S.gcalMine = !!r.data;
+}
+const allEvents = () => S.events.concat(S.gcal.filter(g => S.people[g.who]));
 function live(){
   if (channel) { sb.removeChannel(channel); channel = null; }
   if (!S.space) return;
@@ -270,7 +292,7 @@ async function enter(session){
 }
 function leave(){
   if (channel) { sb.removeChannel(channel); channel = null; }
-  Object.assign(S, {authed:false, uid:null, email:"", me:null, space:null, people:{}, invites:[], pending:[], loaded:false, wantCreate:false, reminders:[], events:[], tasks:[]});
+  Object.assign(S, {authed:false, uid:null, email:"", me:null, space:null, people:{}, invites:[], pending:[], loaded:false, wantCreate:false, reminders:[], events:[], tasks:[], gcal:[], gcalStatus:{}, gcalMine:false});
   render();
 }
 function writeErr(){ toast("Ça n'a pas été enregistré. Vérifie ta connexion."); loadAll(); }
@@ -412,6 +434,10 @@ function vProfile(){
 }
 
 function evRow(e, withDate){
+  if (e.kind === "gcal") return `<div class="row" style="${cv(e.who)}">
+    <span class="time">${withDate ? esc(nice(e.date)) : evTime(e)}</span>
+    <div class="row-main"><div class="row-t">${esc(e.title)}</div>
+      <div class="row-m">${withDate ? evTime(e)+", " : ""}${nmFull(e.who)}, Google Agenda${e.end && !e.allDay ? `, jusqu'à ${esc(e.end)}` : ""}</div></div></div>`;
   const prop = e.kind === "couple" && e.status === "proposed";
   return `<div class="row" style="${cv(e.who)}">
     <span class="time">${withDate ? esc(nice(e.date)) : evTime(e)}</span>
@@ -458,7 +484,7 @@ function vFrigo(){
   const rows = [];
   toAnswer().forEach(e => rows.push(proposalRow(e)));
   toValidate().forEach(x => rows.push(taskRow(x)));
-  S.events.filter(e => e.date === t && evVisible(e) && !(e.kind === "couple" && e.status === "proposed" && e.by !== me)).sort((a,b) => evKey(a).localeCompare(evKey(b))).forEach(e => rows.push(evRow(e)));
+  allEvents().filter(e => e.date === t && evVisible(e) && !(e.kind === "couple" && e.status === "proposed" && e.by !== me)).sort((a,b) => evKey(a).localeCompare(evKey(b))).forEach(e => rows.push(evRow(e)));
   S.tasks.filter(x => x.status === "todo" && mineT(x) && x.due && x.due <= t).sort((a,b) => a.due.localeCompare(b.due)).forEach(x => rows.push(taskRow(x)));
   return `
     <section>
@@ -479,7 +505,7 @@ function vAgenda(){
   const y = S.month.getFullYear(), m = S.month.getMonth(), t = today();
   const offset = (new Date(y,m,1).getDay() + 6) % 7, n = new Date(y,m+1,0).getDate();
   const by = {};
-  S.events.filter(evVisible).forEach(e => (by[e.date] = by[e.date] || []).push(e));
+  allEvents().filter(evVisible).forEach(e => (by[e.date] = by[e.date] || []).push(e));
   let cells = "LMMJVSD".split("").map(d => `<div class="dow">${d}</div>`).join("") + "<div></div>".repeat(offset);
   for (let d = 1; d <= n; d++) {
     const k = `${y}-${pad(m+1)}-${pad(d)}`, seen = {};
@@ -613,6 +639,15 @@ function fSettings(){
     <label class="f"><span>Ton prénom</span><input class="in" id="g-n" maxlength="20" value="${esc(P(S.me).name)}"></label>
     <div class="f"><span>Ta couleur</span>${swatches("g-c", P(S.me).color, taken)}</div>
     <button class="btn yes big" data-act="settings-save">Enregistrer</button>
+    <section class="sec"><div class="sec-h"><h2>Google Agenda</h2></div>
+      ${S.gcalMine ? `<div class="list"><div class="row" style="${cv(S.me)}"><div class="row-main"><div class="row-t">Ton Google Agenda est relié</div>
+        <div class="row-m">${S.gcalStatus[S.me] === false ? "Lecture impossible : vérifie l'adresse, ou retire-la et colle-la à nouveau" : "Tes événements apparaissent dans l'agenda, avec ta couleur"}</div></div>
+        <div class="acts"><button class="btn" data-act="gcal-off">Retirer</button></div></div></div>` : `
+      <p class="sub" style="margin-bottom:10px">Colle l'adresse secrète iCal de ton Google Agenda : tes événements s'afficheront dans l'agenda, avec ta couleur. Personne d'autre ne verra cette adresse.</p>
+      <label class="f"><span>Adresse secrète au format iCal</span><input class="in" id="g-ics" type="url" autocapitalize="none" autocomplete="off" placeholder="https://calendar.google.com/calendar/ical/…"></label>
+      <button class="btn big" data-act="gcal-save">Relier mon Google Agenda</button>
+      <p class="sub" style="margin-top:8px;font-size:.85rem">Où la trouver : sur calendar.google.com, Paramètres, ton agenda dans la liste de gauche, section « Intégrer l'agenda », « Adresse secrète au format iCal ».</p>`}
+    </section>
     <section class="sec"><div class="sec-h"><h2>${couple() ? "Votre couple" : "Votre famille"}</h2></div>
       <div class="list">${ids().map(k => `<div class="row" style="${cv(k)}"><div class="row-main"><div class="row-t">${esc(P(k).name)}${k===S.me ? " (toi)" : ""}</div></div></div>`).join("")}
       ${S.pending.map(e => `<div class="row" style="--c:var(--line);--c2:var(--line)"><div class="row-main"><div class="row-t">${esc(e)}</div><div class="row-m">invitation en attente</div></div>
@@ -670,7 +705,20 @@ const A = {
     else if (!r.data.session) toast("Compte créé. Confirme ton e-mail, puis connecte-toi.");
   },
   async logout(){ closeSheet(); await sb.auth.signOut(); },
-  async settings(){ await loadPending(); fSettings(); },
+  async settings(){ await Promise.all([loadPending(), loadGcalMine()]); fSettings(); },
+  async "gcal-save"(){
+    const url = val("g-ics");
+    if (!url.startsWith(GCAL_PREFIX)) { bad("g-ics"); return toast("Ce n'est pas une adresse iCal Google : elle commence par https://calendar.google.com/calendar/ical/"); }
+    const r = await sb.from("calendar_feeds").upsert({user_id:S.uid, url, updated_at:new Date().toISOString()});
+    if (r.error) return toast("Ça n'a pas marché. Vérifie ta connexion.");
+    S.gcalMine = true; toast("Google Agenda relié");
+    await loadGcal(); fSettings();
+  },
+  async "gcal-off"(){
+    const r = await sb.from("calendar_feeds").delete().eq("user_id", S.uid);
+    if (r.error) return toast("Ça n'a pas marché. Vérifie ta connexion.");
+    S.gcalMine = false; S.gcal = S.gcal.filter(g => g.who !== S.me); render(); fSettings(); toast("Google Agenda retiré");
+  },
   "note-view"(d){ S.noteView = d.v; render(); },
   "task-who"(d){ S.taskWho = d.v; render(); },
   "task-cat"(d){ S.taskCat = d.v; render(); },

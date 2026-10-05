@@ -9,6 +9,7 @@ Cible : deux iPhone, installée depuis Safari sur l'écran d'accueil. Interface 
 - `index.html` : toute l'appli (HTML, CSS, JavaScript pur, sans build ni framework).
 - `schema.sql` : schéma Supabase à exécuter une fois dans le SQL Editor.
 - `apple-touch-icon.png` : icône d'écran d'accueil iOS (180 x 180).
+- `supabase/functions/gcal/index.ts` : fonction Edge `gcal` (copie de référence ; déployée via l'outil Supabase, `verify_jwt` désactivé et authentification faite dans le code).
 
 ## Lancer et déployer
 
@@ -22,6 +23,7 @@ Cible : deux iPhone, installée depuis Safari sur l'écran d'accueil. Interface 
 - Authentification : e-mail + mot de passe, avec « Confirm email » activé (choix de l'utilisateur). Le lien de confirmation renvoie vers la Site URL, à régler avant de créer les comptes. Les inscriptions restent ouvertes (un espace par personne qui s'inscrit). L'inscription passe `emailRedirectTo` = adresse de l'appli ; `https://geh97.github.io/chez-nous/**` doit être dans les Redirect URLs.
 - Tables : `spaces (id, kind couple|famille)`, `members (user_id pk, space_id)` (un seul espace par compte), `invites (space_id, email)`, `docs (space_id, coll, id, data jsonb, updated_at)`, clé primaire `(space_id, coll, id)`.
 - RLS : chacun ne voit que son espace (`space_id = my_space()`). Les écritures sensibles passent par des RPC `security definer` : `create_space(p_kind)`, `invite(p_email)`, `my_invites()`, `accept_invite(sid)`. Une invitation n'est acceptée que pour l'e-mail confirmé du compte connecté. Capacité : 2 (couple), 6 (famille), invitations en attente comprises.
+- Google Agenda : table `calendar_feeds (user_id, url)` (chacun ne voit que la sienne). La fonction `gcal` vérifie le JWT, lit les adresses iCal secrètes des membres de l'espace avec la clé secrète (variable d'environnement), et renvoie les événements de J-62 à J+366 (`{owner, id, title, allDay, date | start, end}` en ISO UTC). Côté client : `loadGcal()` après chaque `loadAll()`, événements `kind: "gcal"` en lecture seule dans `S.gcal`, fusionnés par `allEvents()` dans l'Agenda et « Aujourd'hui ».
 - Temps réel : abonnement `postgres_changes` sur `docs` (filtré côté client sur `space_id`, car les DELETE ne sont pas filtrés par RLS), plus rechargement complet au retour au premier plan (`visibilitychange`).
 
 ## Modèle de données (champ `data`)
