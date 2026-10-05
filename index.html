@@ -149,6 +149,7 @@ textarea.in{resize:none;font-family:var(--hand);font-size:1.5rem;font-weight:700
 .seg-b[aria-pressed="true"]{background:linear-gradient(135deg,var(--c,var(--ink)),var(--c2,var(--c,var(--ink))));color:var(--on,var(--bg))}
 .sw{width:40px;height:40px;border-radius:50%;background:var(--c)}
 .sw[aria-pressed="true"]{box-shadow:0 0 0 3px var(--bg),0 0 0 6px var(--c)}
+.sw:disabled{opacity:.2;cursor:not-allowed}
 .sws{display:flex;gap:12px;flex-wrap:wrap;padding:6px 3px}
 .check{display:flex;align-items:center;gap:10px;background:var(--paper);border-radius:14px;padding:12px;font-weight:600}
 .check input{width:22px;height:22px;accent-color:var(--ink)}
@@ -158,7 +159,8 @@ textarea.in{resize:none;font-family:var(--hand);font-size:1.5rem;font-weight:700
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:20;
   background:var(--ink);color:var(--bg);padding:10px 16px;border-radius:999px;font-weight:600;font-size:.9rem;max-width:90%;text-align:center}
 .who{display:flex;flex-direction:column;gap:12px}
-.who button{display:flex;align-items:center;gap:14px;background:var(--paper);border-radius:20px;padding:16px;font-size:1.2rem;font-weight:800}
+.who button{display:flex;align-items:center;gap:14px;background:var(--paper);border-radius:20px;padding:16px;font-size:1.2rem;font-weight:800;text-align:left}
+.who small{display:block;font-size:.88rem;font-weight:400;color:var(--muted);margin-top:2px}
 </style>
 </head>
 <body>
@@ -175,6 +177,8 @@ const COLORS = [
 const CATS = {maison:"Maison", perso:"Perso", couple:"Couple"};
 const RECS = {none:"Une fois", daily:"Chaque jour", weekly:"Chaque semaine", monthly:"Chaque mois"};
 const COLLS = ["reminders","events","tasks"];
+const CAP = {couple:2, famille:6};
+const APP_URL = location.origin + location.pathname;
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -200,13 +204,11 @@ function nextDue(s, rec){
   return ymd(d);
 }
 const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,8);
-const LS = {
-  get(k){ try { return JSON.parse(localStorage.getItem("cheznous:"+k)); } catch(e){ return null; } },
-  set(k,v){ try { localStorage.setItem("cheznous:"+k, JSON.stringify(v)); } catch(e){} }
-};
+const LOADING = `<div class="center"><p class="brand">Chez nous</p><p class="sub">On ouvre la porte…</p></div>`;
 
 const S = {
-  authed:false, blocked:false, uid:null, readOnly:false, failed:false, cfgLoaded:false, config:null, me:null,
+  authed:false, uid:null, email:"", readOnly:false, failed:false, loaded:false,
+  space:null, invites:[], pending:[], wantCreate:false, people:{}, me:null,
   reminders:[], events:[], tasks:[],
   tab:"frigo", noteView:"recus", month:new Date(new Date().getFullYear(), new Date().getMonth(), 1), day:today(),
   taskWho:"me", taskCat:"all", showDone:false, edit:null
@@ -217,43 +219,58 @@ const SB_URL = "https://ahbfgjfzrmxwifzltnov.supabase.co";
 const SB_KEY = "sb_publishable_5KRLBH1wIB3cNhmewY3u-g_jcu9OfNL";
 let sb = null, channel = null;
 
-function resolveMe(){
-  const p = S.config && S.config.people;
-  if (!p) { S.me = null; return; }
-  if (S.uid) for (const k of ["p1","p2"]) if (p[k] && p[k].uid === S.uid) { S.me = k; return; }
-  const ls = LS.get("me");
-  S.me = (ls && p[ls]) ? ls : null;
-}
 function applyRow(coll, id, data){
-  if (coll === "config") { if (id === "main") { S.config = data; resolveMe(); } return; }
+  if (coll === "people") { if (data) S.people[id] = data; else delete S.people[id]; S.me = S.people[S.uid] ? S.uid : null; return; }
   if (COLLS.indexOf(coll) < 0) return;
   S[coll] = S[coll].filter(x => x.id !== id);
   if (data) S[coll].push(Object.assign({}, data, {id}));
 }
-async function loadAll(){
-  const r = await sb.from("docs").select("coll,id,data");
-  if (r.error) { if (!S.cfgLoaded) { S.failed = true; render(); } return; }
-  S.config = null; COLLS.forEach(c => S[c] = []);
-  r.data.forEach(row => applyRow(row.coll, row.id, row.data));
-  S.cfgLoaded = true; resolveMe(); render();
+function fail(){ if (!S.loaded) { S.failed = true; render(); } }
+async function loadPending(){
+  if (!S.space) return;
+  const r = await sb.from("invites").select("email").eq("space_id", S.space.id).order("created_at");
+  if (!r.error) S.pending = r.data.map(x => x.email);
 }
-async function enter(session){
-  if (S.authed && S.uid === session.user.id) return;
-  S.uid = session.user.id; S.authed = true; S.blocked = false; S.cfgLoaded = false;
-  $("#app").dataset.screen = ""; $("#app").innerHTML = `<div class="center"><p class="brand">Chez nous</p><p class="sub">On ouvre la porte…</p></div>`;
-  const j = await sb.rpc("join_home");
-  if (j.error) { S.failed = true; return render(); }
-  if (j.data === false) { S.blocked = true; return render(); }
-  await loadAll();
-  if (channel) sb.removeChannel(channel);
-  channel = sb.channel("docs-live").on("postgres_changes", {event:"*", schema:"public", table:"docs"}, p => {
-    if (p.eventType === "DELETE") applyRow(p.old.coll, p.old.id, null); else applyRow(p.new.coll, p.new.id, p.new.data);
+async function loadAll(){
+  const s = await sb.from("spaces").select("id,kind").maybeSingle();
+  if (s.error) return fail();
+  if (!s.data) {
+    const i = await sb.rpc("my_invites");
+    if (i.error) return fail();
+    Object.assign(S, {space:null, people:{}, me:null, pending:[], invites:i.data || []});
+    COLLS.forEach(c => S[c] = []);
+  } else {
+    const [r, p] = await Promise.all([
+      sb.from("docs").select("coll,id,data").eq("space_id", s.data.id),
+      sb.from("invites").select("email").eq("space_id", s.data.id).order("created_at")
+    ]);
+    if (r.error || p.error) return fail();
+    Object.assign(S, {space:s.data, people:{}, me:null, invites:[], pending:p.data.map(x => x.email)});
+    COLLS.forEach(c => S[c] = []);
+    r.data.forEach(row => applyRow(row.coll, row.id, row.data));
+  }
+  S.loaded = true; render();
+}
+function live(){
+  if (channel) { sb.removeChannel(channel); channel = null; }
+  if (!S.space) return;
+  channel = sb.channel("docs-" + S.space.id).on("postgres_changes", {event:"*", schema:"public", table:"docs"}, p => {
+    const row = p.eventType === "DELETE" ? p.old : p.new;
+    if (!S.space || !row || row.space_id !== S.space.id) return;
+    applyRow(row.coll, row.id, p.eventType === "DELETE" ? null : row.data);
     render();
   }).subscribe();
 }
+async function enter(session){
+  if (S.authed && S.uid === session.user.id) return;
+  S.uid = session.user.id; S.email = (session.user.email || "").toLowerCase();
+  S.authed = true; S.loaded = false; S.wantCreate = false;
+  $("#app").dataset.screen = ""; $("#app").innerHTML = LOADING;
+  await loadAll(); live();
+}
 function leave(){
   if (channel) { sb.removeChannel(channel); channel = null; }
-  Object.assign(S, {authed:false, uid:null, me:null, config:null, cfgLoaded:false, blocked:false, reminders:[], events:[], tasks:[]});
+  Object.assign(S, {authed:false, uid:null, email:"", me:null, space:null, people:{}, invites:[], pending:[], loaded:false, wantCreate:false, reminders:[], events:[], tasks:[]});
   render();
 }
 function writeErr(){ toast("Ça n'a pas été enregistré. Vérifie ta connexion."); loadAll(); }
@@ -262,34 +279,36 @@ const store = {
     if (!window.supabase) { S.failed = true; return render(); }
     sb = window.supabase.createClient(SB_URL, SB_KEY);
     sb.auth.onAuthStateChange((evt, session) => { setTimeout(() => { if (session) enter(session); else leave(); }, 0); });
-    document.addEventListener("visibilitychange", () => { if (!document.hidden && S.authed && S.cfgLoaded) loadAll(); });
+    document.addEventListener("visibilitychange", () => { if (!document.hidden && S.authed && S.loaded) loadAll(); });
   },
   async put(c, item){
     const id = item.id || newId(); const data = Object.assign({}, item); delete data.id;
     applyRow(c, id, data); render();
-    const r = await sb.from("docs").upsert({coll:c, id, data, updated_at:new Date().toISOString()});
+    const r = await sb.from("docs").upsert({space_id:S.space.id, coll:c, id, data, updated_at:new Date().toISOString()});
     if (r.error) { writeErr(); return false; } return true;
   },
   async del(c, id){
     applyRow(c, id, null); render();
-    const r = await sb.from("docs").delete().eq("coll", c).eq("id", id);
-    if (r.error) { writeErr(); return false; } return true;
-  },
-  async putConfig(cfg){
-    applyRow("config", "main", cfg); render();
-    const r = await sb.from("docs").upsert({coll:"config", id:"main", data:cfg, updated_at:new Date().toISOString()});
+    const r = await sb.from("docs").delete().eq("space_id", S.space.id).eq("coll", c).eq("id", id);
     if (r.error) { writeErr(); return false; } return true;
   }
 };
 
 /* ---------- personnes ---------- */
-const P = k => S.config.people[k];
-const other = () => S.me === "p1" ? "p2" : "p1";
+const couple = () => !S.space || S.space.kind === "couple";
+const P = k => S.people[k] || {name:"?", color:"mandarine"};
+const ids = () => Object.keys(S.people).sort((a,b) => (S.people[a].joinedAt||0) - (S.people[b].joinedAt||0));
+const others = () => ids().filter(k => k !== S.me);
+const pName = () => { const o = couple() && others()[0]; return o ? P(o).name : null; };   // prénom de l'autre, en couple
 const hex = k => (COLORS.find(c => c.id === P(k).color) || COLORS[0]).hex;
-const cv = who => who === "both" ? `--c:${hex("p1")};--c2:${hex("p2")}` : `--c:${hex(who)};--c2:${hex(who)}`;
-const nm = who => who === "both" ? "Nous deux" : (who === S.me ? "Moi" : esc(P(who).name));
-const nmFull = who => who === "both" ? "nous deux" : esc(P(who).name);
+const bothHex = () => { const l = ids(), a = l[0] ? hex(l[0]) : COLORS[0].hex; return [a, l[1] ? hex(l[1]) : a]; };
+const cv = who => { if (who === "both") { const [a,b] = bothHex(); return `--c:${a};--c2:${b}`; } return `--c:${hex(who)};--c2:${hex(who)}`; };
+const ALL = () => couple() ? "Nous deux" : "Tout le monde";
+const MOMENT = () => couple() ? "moment à deux" : "moment en famille";
+const nm = who => who === "both" ? ALL() : (who === S.me ? "Moi" : esc(P(who).name));
+const nmFull = who => who === "both" ? ALL().toLowerCase() : esc(P(who).name);
 const av = (k, cls) => `<span class="av ${cls||""}" style="${cv(k)}">${esc((P(k).name||"?").charAt(0).toUpperCase())}</span>`;
+const freeColor = taken => (COLORS.find(c => taken.indexOf(c.id) < 0) || COLORS[0]).id;
 
 /* ---------- icônes ---------- */
 const I = {
@@ -319,10 +338,12 @@ function render(){
   const app = $("#app");
   if (S.failed) { app.dataset.screen = "err"; app.innerHTML = `<div class="center"><p class="brand">Chez nous</p><p class="sub">Impossible de joindre le serveur. Vérifie ta connexion et recharge la page.</p></div>`; return; }
   if (!S.authed) { if (app.dataset.screen !== "login") { app.dataset.screen = "login"; app.innerHTML = vLogin(); } return; }
-  if (S.blocked) { app.dataset.screen = "blocked"; app.innerHTML = `<div class="center"><p class="brand">Chez nous</p><p class="sub">Cet espace est déjà complet : deux personnes y sont inscrites.</p><button class="btn big" data-act="logout">Se déconnecter</button></div>`; return; }
-  if (!S.cfgLoaded) return;
-  if (!S.config || !S.config.people) { if (app.dataset.screen !== "setup") { app.dataset.screen = "setup"; app.innerHTML = vSetup(); } return; }
-  if (!S.me) { app.dataset.screen = "who"; app.innerHTML = vWho(); return; }
+  if (!S.loaded) return;
+  if (!S.space) {
+    const scr = S.invites.length && !S.wantCreate ? "invited" : "create";
+    app.dataset.screen = scr; app.innerHTML = scr === "invited" ? vInvited() : vCreate(); return;
+  }
+  if (!S.me) { if (app.dataset.screen !== "profile") { app.dataset.screen = "profile"; app.innerHTML = vProfile(); } return; }
   app.dataset.screen = "main";
   const views = {frigo:vFrigo, agenda:vAgenda, taches:vTaches, deux:vDeux};
   const d = new Date().toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long"});
@@ -331,19 +352,25 @@ function render(){
   app.innerHTML = `
     <header class="top">
       <div><h1 class="brand">Chez nous</h1><p class="sub">${esc(d)}</p></div>
-      <button class="duo" data-act="settings" aria-label="Réglages">${av(S.me,"me")}${av(other())}</button>
+      <button class="duo" data-act="settings" aria-label="Réglages">${av(S.me,"me")}${others().map(k => av(k)).join("")}</button>
     </header>
     ${S.readOnly ? `<p class="banner">Tu es en lecture seule. Demande à être invité(e) comme éditeur pour ajouter des choses.</p>` : ""}
+    ${others().length ? "" : vAlone()}
     <main>${views[S.tab]()}</main>
     <nav class="tabs"><div class="tabs-in">
       ${tab("frigo","Frigo",I.frigo)}${tab("agenda","Agenda",I.cal)}
       <button class="plus" style="${cv("both")}" data-act="add" aria-label="Ajouter">${I.plus}</button>
-      ${tab("taches","Tâches",I.check)}${tab("deux","À deux",I.heart)}
+      ${tab("taches","Tâches",I.check)}${tab("deux",couple() ? "À deux" : "Ensemble",I.heart)}
     </div></nav>`;
 }
 
-function swatches(group, cur){
-  return `<div class="sws">${COLORS.map(c => `<button type="button" class="sw" data-seg="${group}" data-val="${c.id}" aria-pressed="${c.id===cur}" aria-label="${c.id}" style="--c:${c.hex}"></button>`).join("")}</div>`;
+function vAlone(){
+  if (S.pending.length) return `<div class="banner">Invitation envoyée à <b>${esc(S.pending.join(", "))}</b>. Il ne reste qu'à créer un compte avec cette adresse sur l'appli. <button class="link" data-act="settings">Gérer</button></div>`;
+  return `<div class="banner">Tu es seul(e) dans votre espace pour l'instant. <button class="link" data-act="invite">Inviter ${couple() ? "ta moitié" : "ta famille"}</button></div>`;
+}
+function swatches(group, cur, taken){
+  taken = taken || [];
+  return `<div class="sws">${COLORS.map(c => `<button type="button" class="sw" data-seg="${group}" data-val="${c.id}" aria-pressed="${c.id===cur}" aria-label="${c.id}" style="--c:${c.hex}" ${taken.indexOf(c.id)>=0 && c.id!==cur ? "disabled" : ""}></button>`).join("")}</div>`;
 }
 function vLogin(){
   return `<div class="center">
@@ -355,21 +382,33 @@ function vLogin(){
       <p style="text-align:center;margin-top:14px"><button class="link" data-act="signup">Créer mon compte avec cet e-mail</button></p>
     </div></div>`;
 }
-function vSetup(){
+const logoutLink = `<p style="text-align:center"><button class="link" data-act="logout">Se déconnecter</button></p>`;
+function vCreate(){
   return `<div class="center">
-    <div><h1 class="brand">Chez nous</h1><p class="sub">Deux prénoms, deux couleurs, et c'est parti.</p></div>
+    <div><h1 class="brand">Chez nous</h1><p class="sub">Bienvenue. Cet espace, c'est pour…</p></div>
+    <div class="who">
+      <button data-act="create" data-kind="couple"><span>Notre couple<small>Deux personnes : rappels, agenda, tâches, moments à deux</small></span></button>
+      <button data-act="create" data-kind="famille"><span>Notre famille<small>Jusqu'à six personnes, une couleur chacun</small></span></button>
+    </div>
+    ${S.invites.length ? `<p style="text-align:center"><button class="link" data-act="see-invites">Voir mon invitation</button></p>` : ""}
+    ${logoutLink}</div>`;
+}
+function vInvited(){
+  return `<div class="center">
+    <div><h1 class="brand">Chez nous</h1><p class="sub">Tu as été invité(e) à rejoindre un espace.</p></div>
+    <div class="who">${S.invites.map(i => `<button data-act="join" data-sid="${esc(i.space_id)}"><span>Rejoindre ${esc(i.from_name)}<small>${i.kind === "couple" ? "Espace de couple" : "Espace de famille"}</small></span></button>`).join("")}</div>
+    <p style="text-align:center"><button class="link" data-act="want-create">Créer plutôt mon propre espace</button></p>
+    ${logoutLink}</div>`;
+}
+function vProfile(){
+  const taken = others().map(k => P(k).color);
+  return `<div class="center">
+    <div><h1 class="brand">Chez nous</h1><p class="sub">Un prénom, une couleur, et c'est parti.</p></div>
     <div>
       <label class="f"><span>Ton prénom</span><input class="in" id="s-n1" autocomplete="given-name" maxlength="20"></label>
-      <div class="f"><span>Ta couleur</span>${swatches("s-c1","mandarine")}</div>
-      <label class="f"><span>Le prénom de ta moitié</span><input class="in" id="s-n2" maxlength="20"></label>
-      <div class="f"><span>Sa couleur</span>${swatches("s-c2","menthe")}</div>
-      <button class="btn yes big" data-act="setup-save">Créer notre espace</button>
+      <div class="f"><span>Ta couleur</span>${swatches("s-c1", freeColor(taken), taken)}</div>
+      <button class="btn yes big" data-act="profile-save">C'est parti</button>
     </div></div>`;
-}
-function vWho(){
-  const free = ["p1","p2"].filter(k => !P(k).uid || P(k).uid === S.uid);
-  return `<div class="center"><div><h1 class="brand">Chez nous</h1><p class="sub">Qui tient le téléphone ?</p></div>
-    <div class="who">${(free.length ? free : ["p1","p2"]).map(k => `<button data-act="iam" data-k="${k}">${av(k)}<span>Je suis ${esc(P(k).name)}</span></button>`).join("")}</div></div>`;
 }
 
 function evRow(e, withDate){
@@ -378,16 +417,16 @@ function evRow(e, withDate){
     <span class="time">${withDate ? esc(nice(e.date)) : evTime(e)}</span>
     <button class="row-main" data-act="${e.kind==="couple"?"deux-edit":"ev-edit"}" data-id="${e.id}">
       <div class="row-t">${esc(e.title)}</div>
-      <div class="row-m">${withDate ? evTime(e)+", " : ""}${e.kind==="couple" ? (prop ? "moment à deux, en attente" : "moment à deux") : nmFull(e.who)}${e.end && !e.allDay ? `, jusqu'à ${esc(e.end)}` : ""}</div>
+      <div class="row-m">${withDate ? evTime(e)+", " : ""}${e.kind==="couple" ? (prop ? MOMENT()+", en attente" : MOMENT()) : nmFull(e.who)}${e.end && !e.allDay ? `, jusqu'à ${esc(e.end)}` : ""}</div>
     </button></div>`;
 }
 function taskRow(t){
-  const tdy = today(), late = t.status === "todo" && t.due && t.due < tdy;
+  const tdy = today(), late = t.status === "todo" && t.due && t.due < tdy, pn = pName();
   const meta = [CATS[t.category] || "Maison"];
   if (t.assignee !== S.me) meta.unshift(nmFull(t.assignee));
   if (t.due) meta.push((late ? "en retard, " : "") + nice(t.due));
   if (t.recurrence && t.recurrence !== "none") meta.push(RECS[t.recurrence].toLowerCase());
-  if (t.status === "pending") meta.push(t.doneBy === S.me ? `en attente de ${esc(P(other()).name)}` : `fait par ${nmFull(t.doneBy)}`);
+  if (t.status === "pending") meta.push(t.doneBy === S.me ? (pn ? `en attente de ${esc(pn)}` : "en attente de validation") : `fait par ${nmFull(t.doneBy)}`);
   const toVal = t.status === "pending" && t.doneBy !== S.me;
   const cls = t.status === "done" ? "on" : t.status === "pending" ? "wait" : "";
   return `<div class="row ${late?"late":""} ${t.status==="done"?"dim":""}" style="${cv(t.assignee)}">
@@ -398,12 +437,12 @@ function taskRow(t){
 }
 function proposalRow(e){
   return `<div class="row" style="${cv("both")}">
-    <div class="row-main"><div class="row-t">${esc(e.title)}</div><div class="row-m">${esc(nice(e.date))}${e.start?`, ${esc(e.start)}`:""}${e.note?`, ${esc(e.note)}`:""}</div></div>
+    <div class="row-main"><div class="row-t">${esc(e.title)}</div><div class="row-m">${couple() ? "" : `de ${esc(P(e.by).name)}, `}${esc(nice(e.date))}${e.start?`, ${esc(e.start)}`:""}${e.note?`, ${esc(e.note)}`:""}</div></div>
     <div class="acts"><button class="btn" data-act="deux-no" data-id="${e.id}">Refuser</button><button class="btn yes" data-act="deux-yes" data-id="${e.id}">Accepter</button></div></div>`;
 }
 
 function vFrigo(){
-  const me = S.me, o = other(), t = today();
+  const me = S.me, t = today(), pn = pName();
   const recus = notesForMe().sort((a,b) => b.createdAt - a.createdAt);
   const envoyes = S.reminders.filter(r => r.from === me && r.to !== me).sort((a,b) => b.createdAt - a.createdAt);
   const list = S.noteView === "recus" ? recus : envoyes;
@@ -419,7 +458,7 @@ function vFrigo(){
   const rows = [];
   toAnswer().forEach(e => rows.push(proposalRow(e)));
   toValidate().forEach(x => rows.push(taskRow(x)));
-  S.events.filter(e => e.date === t && evVisible(e)).sort((a,b) => evKey(a).localeCompare(evKey(b))).forEach(e => rows.push(evRow(e)));
+  S.events.filter(e => e.date === t && evVisible(e) && !(e.kind === "couple" && e.status === "proposed" && e.by !== me)).sort((a,b) => evKey(a).localeCompare(evKey(b))).forEach(e => rows.push(evRow(e)));
   S.tasks.filter(x => x.status === "todo" && mineT(x) && x.due && x.due <= t).sort((a,b) => a.due.localeCompare(b.due)).forEach(x => rows.push(taskRow(x)));
   return `
     <section>
@@ -428,7 +467,7 @@ function vFrigo(){
           <button class="chip" data-act="note-view" data-v="recus" aria-pressed="${S.noteView==="recus"}">Pour moi</button>
           <button class="chip" data-act="note-view" data-v="envoyes" aria-pressed="${S.noteView==="envoyes"}">Envoyés</button>
         </div></div>
-      ${notes ? `<div class="notes">${notes}</div>` : `<p class="empty">${S.noteView==="recus" ? `Rien sur le frigo. Colle un rappel à ${esc(P(o).name)} avec le bouton +.` : `Tu n'as laissé aucun rappel à ${esc(P(o).name)}.`}</p>`}
+      ${notes ? `<div class="notes">${notes}</div>` : `<p class="empty">${S.noteView==="recus" ? `Rien sur le frigo. Colle un rappel ${pn ? "à "+esc(pn) : "à quelqu'un"} avec le bouton +.` : `Tu n'as laissé aucun rappel${pn ? " à "+esc(pn) : ""}.`}</p>`}
     </section>
     <section class="sec">
       <div class="sec-h"><h2>Aujourd'hui</h2></div>
@@ -463,8 +502,8 @@ function vAgenda(){
 }
 
 function vTaches(){
-  const o = other(), t = today();
-  const inWho = x => S.taskWho === "all" || (S.taskWho === "me" ? mineT(x) : (x.assignee === o || x.assignee === "both"));
+  const t = today();
+  const inWho = x => S.taskWho === "all" || (S.taskWho === "me" ? mineT(x) : (x.assignee === S.taskWho || x.assignee === "both"));
   const inCat = x => S.taskCat === "all" || x.category === S.taskCat;
   const all = S.tasks.filter(inCat);
   const val = all.filter(x => x.status === "pending" && x.doneBy !== S.me);
@@ -474,7 +513,7 @@ function vTaches(){
   const grp = (label, arr) => arr.length ? `<section class="sec"><div class="sec-h"><h2>${label}</h2></div><div class="list">${arr.map(taskRow).join("")}</div></section>` : "";
   const chip = (act, v, cur, label) => `<button class="chip" data-act="${act}" data-v="${v}" aria-pressed="${v===cur}">${label}</button>`;
   return `
-    <div class="chips">${chip("task-who","me",S.taskWho,"Moi")}${chip("task-who","other",S.taskWho,esc(P(o).name))}${chip("task-who","all",S.taskWho,"Tout")}</div>
+    <div class="chips">${chip("task-who","me",S.taskWho,"Moi")}${others().map(k => chip("task-who",k,S.taskWho,esc(P(k).name))).join("")}${chip("task-who","all",S.taskWho,"Tout")}</div>
     <div class="chips" style="margin-top:8px">${chip("task-cat","all",S.taskCat,"Toutes")}${Object.keys(CATS).map(c => chip("task-cat",c,S.taskCat,CATS[c])).join("")}</div>
     ${grp("À valider", val)}
     ${grp("En retard", todo.filter(x => x.due && x.due < t))}
@@ -488,19 +527,22 @@ function vTaches(){
 }
 
 function vDeux(){
-  const t = today(), o = esc(P(other()).name);
+  const t = today(), o = esc(pName() || "ta moitié");
+  const h = couple()
+    ? {btn:"Proposer un moment à deux", ans:`${o} te propose`, mine:`En attente de ${o}`, no:`Pas possible pour ${o}`, empty:`Aucun moment à deux de prévu. Propose une date, ${o} n'a plus qu'à accepter.`}
+    : {btn:"Proposer un moment en famille", ans:"On te propose", mine:"En attente de réponse", no:"Pas possible", empty:"Aucun moment en famille de prévu. Propose une date, les autres n'ont plus qu'à accepter."};
   const c = S.events.filter(e => e.kind === "couple");
   const mineP = c.filter(e => e.status === "proposed" && e.by === S.me);
   const next = c.filter(e => e.status === "accepted" && e.date >= t).sort((a,b) => (a.date+evKey(a)).localeCompare(b.date+evKey(b)));
   const no = c.filter(e => e.status === "declined" && e.by === S.me);
   const ans = toAnswer();
   return `
-    <button class="btn big duo-bg" style="${cv("both")}" data-act="deux-new">Proposer un moment à deux</button>
-    ${ans.length ? `<section class="sec"><div class="sec-h"><h2>${o} te propose</h2></div><div class="list">${ans.map(proposalRow).join("")}</div></section>` : ""}
-    ${mineP.length ? `<section class="sec"><div class="sec-h"><h2>En attente de ${o}</h2></div><div class="list">${mineP.map(e => evRow(e,true)).join("")}</div></section>` : ""}
+    <button class="btn big duo-bg" style="${cv("both")}" data-act="deux-new">${h.btn}</button>
+    ${ans.length ? `<section class="sec"><div class="sec-h"><h2>${h.ans}</h2></div><div class="list">${ans.map(proposalRow).join("")}</div></section>` : ""}
+    ${mineP.length ? `<section class="sec"><div class="sec-h"><h2>${h.mine}</h2></div><div class="list">${mineP.map(e => evRow(e,true)).join("")}</div></section>` : ""}
     <section class="sec"><div class="sec-h"><h2>Prévus</h2></div>
-      ${next.length ? `<div class="list">${next.map(e => evRow(e,true)).join("")}</div>` : `<p class="empty">Aucun moment à deux de prévu. Propose une date, ${o} n'a plus qu'à accepter.</p>`}</section>
-    ${no.length ? `<section class="sec"><div class="sec-h"><h2>Pas possible pour ${o}</h2></div><div class="list">${no.map(e => evRow(e,true)).join("")}</div><p class="sub" style="margin-top:8px">Touche un moment pour proposer une autre date.</p></section>` : ""}`;
+      ${next.length ? `<div class="list">${next.map(e => evRow(e,true)).join("")}</div>` : `<p class="empty">${h.empty}</p>`}</section>
+    ${no.length ? `<section class="sec"><div class="sec-h"><h2>${h.no}</h2></div><div class="list">${no.map(e => evRow(e,true)).join("")}</div><p class="sub" style="margin-top:8px">Touche un moment pour proposer une autre date.</p></section>` : ""}`;
 }
 
 /* ---------- panneaux ---------- */
@@ -509,7 +551,7 @@ function seg(group, opts, cur){
 }
 const segVal = g => { const el = document.querySelector(`[data-seg="${g}"][aria-pressed="true"]`); return el ? el.dataset.val : null; };
 const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
-const whoOpts = withBoth => { const o = other(); const a = [[S.me,"Moi",cv(S.me)],[o,esc(P(o).name),cv(o)]]; if (withBoth) a.push(["both","Nous deux",cv("both")]); return a; };
+const whoOpts = withBoth => { const a = [[S.me,"Moi",cv(S.me)]].concat(others().map(k => [k, esc(P(k).name), cv(k)])); if (withBoth) a.push(["both",ALL(),cv("both")]); return a; };
 function sheet(title, body){
   $("#sheet").innerHTML = `<div class="veil" data-act="veil"><div class="sheet" role="dialog" aria-modal="true" aria-label="${esc(title)}">
     <div class="sheet-h"><h2>${title}</h2><button class="x" data-act="close" aria-label="Fermer">${I.x}</button></div>${body}</div></div>`;
@@ -522,9 +564,9 @@ function guard(){ if (S.readOnly) { toast("Lecture seule : tu ne peux pas modifi
 const delBtn = act => `<p style="text-align:center;margin-top:14px"><button class="link danger" data-act="${act}">Supprimer</button></p>`;
 
 function fReminder(){
-  const o = other();
+  const os = others();
   sheet("Nouveau rappel", `
-    <div class="f"><span>Pour qui ?</span>${seg("to",[[o,esc(P(o).name),cv(o)],[S.me,"Moi",cv(S.me)]],o)}</div>
+    <div class="f"><span>Pour qui ?</span>${seg("to",os.map(k => [k,esc(P(k).name),cv(k)]).concat([[S.me,"Moi",cv(S.me)]]),os[0] || S.me)}</div>
     <label class="f"><span>Le rappel</span><textarea class="in" id="f-text" rows="3" maxlength="140" placeholder="Passer prendre le pain"></textarea></label>
     <label class="f"><span>Pour quand ? (facultatif)</span><input class="in" type="date" id="f-date"></label>
     <button class="btn yes big" data-act="rem-save">Coller sur le frigo</button>`);
@@ -543,13 +585,14 @@ function fEvent(e){
 }
 function fDeux(e){
   S.edit = e || null; const x = e || {date:S.tab==="agenda"?S.day:addDays(today(),1), start:"", title:"", note:""};
-  sheet(e ? "Moment à deux" : "Proposer un moment à deux", `
+  const pn = pName(), propose = pn ? `Proposer à ${esc(pn)}` : couple() ? "Proposer" : "Proposer à tout le monde";
+  sheet(e ? (couple() ? "Moment à deux" : "Moment en famille") : (couple() ? "Proposer un moment à deux" : "Proposer un moment en famille"), `
     <label class="f"><span>Quoi ?</span><input class="in" id="f-title" maxlength="80" value="${esc(x.title)}" placeholder="Resto, ciné, balade sur la corniche"></label>
     <div class="two">
       <label class="f"><span>Date</span><input class="in" type="date" id="f-date" value="${esc(x.date)}"></label>
       <label class="f"><span>Heure</span><input class="in" type="time" id="f-start" value="${esc(x.start||"")}"></label></div>
     <label class="f"><span>Un détail ? (facultatif)</span><input class="in" id="f-note" maxlength="80" value="${esc(x.note||"")}" placeholder="Je réserve"></label>
-    <button class="btn big duo-bg" style="${cv("both")}" data-act="deux-save">${!e ? `Proposer à ${esc(P(other()).name)}` : e.status==="declined" ? "Proposer à nouveau" : "Enregistrer"}</button>
+    <button class="btn big duo-bg" style="${cv("both")}" data-act="deux-save">${!e ? propose : e.status==="declined" ? "Proposer à nouveau" : "Enregistrer"}</button>
     ${e ? delBtn("ev-del") : ""}`);
 }
 function fTask(t){
@@ -560,23 +603,40 @@ function fTask(t){
     <div class="f"><span>Catégorie</span>${seg("cat",Object.keys(CATS).map(c => [c,CATS[c]]),x.category)}</div>
     <label class="f"><span>Échéance (facultatif)</span><input class="in" type="date" id="f-date" value="${esc(x.due||"")}"></label>
     <div class="f"><span>Répétition</span>${seg("rec",Object.keys(RECS).map(r => [r,RECS[r]]),x.recurrence||"none")}</div>
-    <label class="check f" style="flex-direction:row"><input type="checkbox" id="f-val" ${x.needsValidation?"checked":""}>À faire valider par l'autre</label>
+    <label class="check f" style="flex-direction:row"><input type="checkbox" id="f-val" ${x.needsValidation?"checked":""}>À faire valider par ${couple() ? "l'autre" : "un autre membre"}</label>
     <button class="btn yes big" data-act="task-save">${t ? "Enregistrer" : "Ajouter la tâche"}</button>${t ? delBtn("task-del") : ""}`);
 }
 function fSettings(){
-  sheet("Réglages", ["p1","p2"].map(k => `
-    <label class="f"><span>${k===S.me ? "Ton prénom" : "Le prénom de ta moitié"}</span><input class="in" id="g-n-${k}" maxlength="20" value="${esc(P(k).name)}"></label>
-    <div class="f"><span>${k===S.me ? "Ta couleur" : "Sa couleur"}</span>${swatches("g-c-"+k, P(k).color)}</div>`).join("") + `
+  const taken = others().map(k => P(k).color);
+  const room = CAP[S.space.kind] - ids().length - S.pending.length;
+  sheet("Réglages", `
+    <label class="f"><span>Ton prénom</span><input class="in" id="g-n" maxlength="20" value="${esc(P(S.me).name)}"></label>
+    <div class="f"><span>Ta couleur</span>${swatches("g-c", P(S.me).color, taken)}</div>
     <button class="btn yes big" data-act="settings-save">Enregistrer</button>
-    <p style="text-align:center;margin-top:14px"><button class="link" data-act="not-me">Je ne suis pas ${esc(P(S.me).name)}</button></p>
-    <p style="text-align:center;margin-top:10px"><button class="link" data-act="logout">Se déconnecter</button></p>`);
+    <section class="sec"><div class="sec-h"><h2>${couple() ? "Votre couple" : "Votre famille"}</h2></div>
+      <div class="list">${ids().map(k => `<div class="row" style="${cv(k)}"><div class="row-main"><div class="row-t">${esc(P(k).name)}${k===S.me ? " (toi)" : ""}</div></div></div>`).join("")}
+      ${S.pending.map(e => `<div class="row" style="--c:var(--line);--c2:var(--line)"><div class="row-main"><div class="row-t">${esc(e)}</div><div class="row-m">invitation en attente</div></div>
+        <div class="acts"><button class="btn" data-act="invite-share" data-email="${esc(e)}">Envoyer le lien</button><button class="btn" data-act="invite-cancel" data-email="${esc(e)}">Annuler</button></div></div>`).join("")}</div>
+      ${room > 0 ? `<button class="btn big" style="margin-top:10px" data-act="invite">Inviter quelqu'un</button>` : ""}
+    </section>
+    <p style="text-align:center;margin-top:18px"><button class="link" data-act="logout">Se déconnecter</button></p>`);
+}
+function fInvite(sent){
+  sheet("Inviter", sent ? `
+    <p style="margin-bottom:10px">C'est noté : seule l'adresse <b>${esc(sent)}</b> pourra rejoindre votre espace.</p>
+    <p class="sub" style="margin-bottom:16px">Envoie-lui le lien de l'appli. Il suffit de créer un compte avec cette adresse et de confirmer l'e-mail reçu pour arriver chez vous.</p>
+    <button class="btn yes big" data-act="invite-share" data-email="${esc(sent)}">Envoyer le lien</button>
+    <p style="text-align:center;margin-top:14px"><button class="link" data-act="close">Plus tard</button></p>` : `
+    <p class="sub" style="margin-bottom:14px">Tape l'adresse e-mail de ${couple() ? "ta moitié" : "la personne"}. Seule cette adresse pourra rejoindre votre espace.</p>
+    <label class="f"><span>Son e-mail</span><input class="in" id="i-email" type="email" autocomplete="off" autocapitalize="none" inputmode="email"></label>
+    <button class="btn yes big" data-act="invite-send">Inviter</button>`);
 }
 function fAdd(){
-  const o = esc(P(other()).name);
+  const pn = pName() ? esc(pName()) : null, cp = couple();
   sheet("Ajouter", `<div class="menu">
-    <button data-act="rem-new">Un rappel<small>Une note collée sur le frigo de ${o}</small></button>
-    <button data-act="ev-new">Un événement<small>Dans ton programme ou le sien</small></button>
-    <button data-act="deux-new">Un moment à deux<small>Tu proposes, ${o} accepte</small></button>
+    <button data-act="rem-new">Un rappel<small>Une note collée sur le frigo ${pn ? "de "+pn : "de quelqu'un"}</small></button>
+    <button data-act="ev-new">Un événement<small>${cp ? "Dans ton programme ou le sien" : "Dans ton programme ou celui d'un autre"}</small></button>
+    <button data-act="deux-new">${cp ? "Un moment à deux" : "Un moment en famille"}<small>${cp ? `Tu proposes, ${pn || "ta moitié"} accepte` : "Tu proposes, les autres acceptent"}</small></button>
     <button data-act="task-new">Une tâche<small>Maison, perso ou couple</small></button></div>`);
 }
 
@@ -605,12 +665,12 @@ const A = {
     const email = val("l-email"), pw = document.getElementById("l-pw").value;
     if (!email) return bad("l-email");
     if (pw.length < 8) { bad("l-pw"); return toast("Choisis un mot de passe d'au moins 8 caractères."); }
-    const r = await sb.auth.signUp({email, password:pw, options:{emailRedirectTo:location.origin + location.pathname}});
+    const r = await sb.auth.signUp({email, password:pw, options:{emailRedirectTo:APP_URL}});
     if (r.error) toast("Création impossible : " + r.error.message);
     else if (!r.data.session) toast("Compte créé. Confirme ton e-mail, puis connecte-toi.");
   },
   async logout(){ closeSheet(); await sb.auth.signOut(); },
-  settings(){ fSettings(); },
+  async settings(){ await loadPending(); fSettings(); },
   "note-view"(d){ S.noteView = d.v; render(); },
   "task-who"(d){ S.taskWho = d.v; render(); },
   "task-cat"(d){ S.taskCat = d.v; render(); },
@@ -618,32 +678,57 @@ const A = {
   day(d){ S.day = d.d; render(); },
   month(d){ S.month = new Date(S.month.getFullYear(), S.month.getMonth() + Number(d.n), 1); render(); },
 
-  async "setup-save"(){
-    const n1 = val("s-n1"), n2 = val("s-n2"), c1 = segVal("s-c1"), c2 = segVal("s-c2");
-    if (!n1) return bad("s-n1"); if (!n2) return bad("s-n2");
-    if (c1 === c2) return toast("Choisissez deux couleurs différentes.");
-    LS.set("me","p1");
-    const ok = await store.putConfig({people:{p1:{name:n1,color:c1,uid:S.uid||null}, p2:{name:n2,color:c2,uid:null}}});
-    if (!ok) LS.set("me",null);
+  /* espace */
+  "want-create"(){ S.wantCreate = true; render(); },
+  "see-invites"(){ S.wantCreate = false; render(); },
+  async create(d){
+    const r = await sb.rpc("create_space", {p_kind:d.kind});
+    if (r.error) return toast("Création impossible. Vérifie ta connexion.");
+    S.wantCreate = false; await loadAll(); live();
   },
-  async iam(d){
-    LS.set("me", d.k); S.me = d.k;
-    if (S.uid && !P(d.k).uid && !S.readOnly) {
-      const cfg = JSON.parse(JSON.stringify(S.config)); cfg.people[d.k].uid = S.uid; await store.putConfig(cfg);
-    }
-    render();
+  async join(d){
+    const r = await sb.rpc("accept_invite", {sid:d.sid});
+    if (r.error) return toast("Impossible de rejoindre. Vérifie ta connexion.");
+    if (r.data === "plein") toast("Cet espace est déjà complet.");
+    else if (r.data === "introuvable") toast("Cette invitation n'existe plus.");
+    await loadAll(); live();
   },
-  async "not-me"(){
-    const k = S.me; LS.set("me", null); closeSheet();
-    if (S.uid && P(k).uid === S.uid && !S.readOnly) { const cfg = JSON.parse(JSON.stringify(S.config)); cfg.people[k].uid = null; S.me = null; await store.putConfig(cfg); }
-    S.me = null; render();
+  async "profile-save"(){
+    const name = val("s-n1"), color = segVal("s-c1"); if (!name) return bad("s-n1");
+    if (others().some(k => P(k).color === color)) return toast("Cette couleur est déjà prise.");
+    if (await store.put("people", {id:S.uid, name, color, joinedAt:Date.now()}) && !others().length) fInvite();
   },
   async "settings-save"(){
     if (!guard()) return;
-    const cfg = JSON.parse(JSON.stringify(S.config));
-    for (const k of ["p1","p2"]) { const n = val("g-n-"+k); if (!n) return bad("g-n-"+k); cfg.people[k].name = n; cfg.people[k].color = segVal("g-c-"+k) || cfg.people[k].color; }
-    if (cfg.people.p1.color === cfg.people.p2.color) return toast("Choisissez deux couleurs différentes.");
-    if (await store.putConfig(cfg)) { closeSheet(); toast("Enregistré"); }
+    const name = val("g-n"); if (!name) return bad("g-n");
+    const color = segVal("g-c") || P(S.me).color;
+    if (others().some(k => P(k).color === color)) return toast("Cette couleur est déjà prise.");
+    if (await store.put("people", Object.assign({}, P(S.me), {id:S.me, name, color}))) { closeSheet(); toast("Enregistré"); }
+  },
+  invite(){ fInvite(); },
+  async "invite-send"(){
+    const email = val("i-email").toLowerCase(); if (!email) return bad("i-email");
+    const r = await sb.rpc("invite", {p_email:email});
+    if (r.error) return toast("Invitation impossible. Vérifie ta connexion.");
+    if (r.data !== "ok") {
+      if (r.data === "invalide") bad("i-email");
+      return toast({invalide:"Cette adresse e-mail n'a pas l'air valide.", plein:couple() ? "Votre espace de couple est déjà complet." : "Votre espace est complet (six personnes).", deja_membre:"Cette personne fait déjà partie de l'espace."}[r.data] || "Invitation impossible.");
+    }
+    await loadPending(); render(); fInvite(email);
+  },
+  async "invite-cancel"(d){
+    const r = await sb.from("invites").delete().eq("space_id", S.space.id).eq("email", d.email);
+    if (r.error) return toast("Ça n'a pas marché. Vérifie ta connexion.");
+    await loadPending(); render(); fSettings();
+  },
+  async "invite-share"(d){
+    const text = `Rejoins-moi sur Chez nous : crée ton compte avec l'adresse ${d.email}.`;
+    if (navigator.share) {
+      try { await navigator.share({title:"Chez nous", text, url:APP_URL}); return; }
+      catch(e){ if (e && e.name === "AbortError") return; }
+    }
+    try { await navigator.clipboard.writeText(text + " " + APP_URL); toast("Lien copié : colle-le dans un message."); }
+    catch(e){ toast(APP_URL); }
   },
 
   "rem-new"(){ fReminder(); },
@@ -677,7 +762,7 @@ const A = {
     const changed = !old || old.date !== date || (old.start||null) !== start || old.status === "declined";
     const e = Object.assign({createdAt:Date.now()}, old || {}, {kind:"couple", who:"both", allDay:false, title, date, start, end:null, note:val("f-note")||null});
     if (changed) { e.status = "proposed"; e.by = S.me; }
-    if (await store.put("events", e)) { closeSheet(); toast(changed ? `Proposé à ${P(other()).name}` : "Enregistré"); }
+    if (await store.put("events", e)) { closeSheet(); toast(changed ? (pName() ? `Proposé à ${pName()}` : "Proposé") : "Enregistré"); }
   },
   async "deux-yes"(d){ if (!guard()) return; const e = find("events", d.id); if (e && await store.put("events", Object.assign({}, e, {status:"accepted"}))) toast("C'est noté dans l'agenda"); },
   async "deux-no"(d){ if (!guard()) return; const e = find("events", d.id); if (e) await store.put("events", Object.assign({}, e, {status:"declined"})); },
@@ -694,7 +779,7 @@ const A = {
   async "task-tick"(d){
     if (!guard()) return; const t = find("tasks", d.id); if (!t) return;
     if (t.status === "done" || t.status === "pending") return store.put("tasks", Object.assign({}, t, {status:"todo", doneBy:null, doneAt:null}));
-    if (t.needsValidation) { await store.put("tasks", Object.assign({}, t, {status:"pending", doneBy:S.me, doneAt:Date.now()})); toast(`Envoyé à ${P(other()).name} pour validation`); }
+    if (t.needsValidation) { await store.put("tasks", Object.assign({}, t, {status:"pending", doneBy:S.me, doneAt:Date.now()})); toast(pName() ? `Envoyé à ${pName()} pour validation` : "Envoyé pour validation"); }
     else await completeTask(t);
   },
   async "task-validate"(d){ if (!guard()) return; const t = find("tasks", d.id); if (t) await completeTask(t); },
@@ -703,7 +788,7 @@ const A = {
 
 document.addEventListener("click", e => {
   const s = e.target.closest("[data-seg]");
-  if (s) { document.querySelectorAll(`[data-seg="${s.dataset.seg}"]`).forEach(b => b.setAttribute("aria-pressed", b === s ? "true" : "false")); return; }
+  if (s) { if (s.disabled) return; document.querySelectorAll(`[data-seg="${s.dataset.seg}"]`).forEach(b => b.setAttribute("aria-pressed", b === s ? "true" : "false")); return; }
   const el = e.target.closest("[data-act]"); if (!el) return;
   if (el.dataset.act === "veil") { if (e.target === el) closeSheet(); return; }
   const fn = A[el.dataset.act]; if (fn) fn(el.dataset, el);
@@ -713,6 +798,7 @@ document.addEventListener("input", e => { if (e.target.classList && e.target.cla
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") closeSheet();
   if (e.key === "Enter" && (e.target.id === "l-email" || e.target.id === "l-pw")) A.login();
+  if (e.key === "Enter" && e.target.id === "i-email") A["invite-send"]();
 });
 
 store.init();
