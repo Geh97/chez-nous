@@ -605,7 +605,7 @@ const A = {
     const email = val("l-email"), pw = document.getElementById("l-pw").value;
     if (!email) return bad("l-email");
     if (pw.length < 8) { bad("l-pw"); return toast("Choisis un mot de passe d'au moins 8 caractères."); }
-    const r = await sb.auth.signUp({email, password:pw});
+    const r = await sb.auth.signUp({email, password:pw, options:{emailRedirectTo:location.origin + location.pathname}});
     if (r.error) toast("Création impossible : " + r.error.message);
     else if (!r.data.session) toast("Compte créé. Confirme ton e-mail, puis connecte-toi.");
   },
